@@ -1,0 +1,94 @@
+#!/bin/sh
+#
+# SPDX-FileCopyrightText: 2020 Anuradha Weeraman <anuradha@weeraman.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Modified by Eunseok Song (david61song@protonmail.com)
+
+set -e
+
+basedir=$(dirname $(readlink -f $0))
+. ${basedir}/config/env.sh
+
+echo "Installing rootfs in ${basedir}!"
+
+check_availability_of() {
+	# Check if the given program is available in PATH
+	prog=$1
+	if ! command -v ${prog} > /dev/null 2>&1; then
+		echo "${prog} not found in path. Please install and try again."
+		exit 1
+	fi
+}
+
+check_availability_of qemu-img
+check_availability_of /sbin/mkfs.ext4
+check_availability_of sudo
+check_availability_of /usr/sbin/debootstrap
+
+echo -n "Removing existing ${rootfs}, press ENTER to proceed... "
+read input
+
+echo -n "Creating rootfs... "
+qemu-img create ${basedir}/rootfs.img ${rootfs_size} 2>&1 | tee -a ${basedir}/log
+/sbin/mkfs.ext4 ${basedir}/rootfs.img 2>&1 | tee -a ${basedir}/log
+
+if [ ! -e ${rootfs} ]; then
+	sudo mkdir ${rootfs}
+fi
+
+echo -n "Mounting ${rootfs} on loopback... "
+sudo mount -o loop ${basedir}/rootfs.img ${rootfs}
+echo "ok"
+
+echo -n "Bootstrapping filesystem... "
+sudo /usr/sbin/debootstrap --arch=amd64 stable ${rootfs} http://deb.debian.org/debian/ 2>&1 | tee -a ${basedir}/log
+echo "ok"
+
+echo -n "Setting hostname: ${hostname}... "
+sudo sh -c "echo '${hostname}' > ${rootfs}/etc/hostname"
+echo "ok"
+
+# Set the root password if needed
+# sudo sh -c "chroot ${rootfs} passwd root"
+
+# ----------------- Network interface -----------------
+#echo "Enabling networking..."
+#sudo cp ${confdir}/dhcp.network ${rootfs}/etc/systemd/network/
+#sudo sh -c "chroot ${rootfs} systemctl enable systemd-networkd.service"
+#sudo sh -c "chroot ${rootfs} systemctl enable systemd-resolved.service"
+
+
+
+# ----------------- Zsh, oh-my-zsh -----------------
+echo "Installing Zsh and oh-my-zsh..."
+# Update package list and install necessary packages
+sudo chroot ${rootfs} apt-get update
+sudo chroot ${rootfs} apt-get install -y zsh git curl
+
+# Change default shell for root from /bin/bash to /bin/zsh
+sudo sed -i 's|/bin/bash|/bin/zsh|' ${rootfs}/etc/passwd
+
+# Install oh-my-zsh for root user in a non-interactive manner
+sudo chroot ${rootfs} sh -c "export RUNZSH=no; export CHSH=no; curl -fsSL https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.sh | sh && exit"
+
+# ----------------- TERM  -----------------
+echo "Configuring TERM environment variable to xterm-256color..."
+sudo sh -c "echo 'export TERM=xterm-256color' >> ${rootfs}/etc/profile"
+
+# ----------------- misc (REF: syzkaller project) -----------------
+echo -n "Setting root as a non-login... "
+sudo sed -i '/^root/ { s/:x:/::/ }' ${rootfs}/etc/passwd
+echo "ok"
+
+if test ! -z "${packages_to_install}"; then
+	echo "Installing additional packages... "
+	sudo sh -c "chroot ${rootfs} apt-get update"
+	sudo sh -c "chroot ${rootfs} apt-get install -y ${packages_to_install}"
+fi
+
+echo -n "Cleaning up... "
+sync
+sleep 5
+sudo umount ${rootfs}
+sudo rmdir ${rootfs}
+echo "ok"
